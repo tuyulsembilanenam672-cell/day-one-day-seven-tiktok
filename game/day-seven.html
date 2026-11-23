@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rocket Dodge — Day Seven</title>
+<meta name="viewport" content="width=1080, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  canvas { display: block; width: 1080px; height: 1920px; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+// Rocket Dodge, DAY SEVEN: the same game after a week of daily updates.
+// Same map, same start, same core: identical seed and spawn schedule as
+// day one, so the rocket flies the same line through the same asteroids.
+// What a week added: a nebula sky with parallax stars, a thruster trail,
+// coloured asteroids, score popups, a combo counter, a shield power-up,
+// and slow background asteroids drifting far behind the action.
+// None of the extras can kill the rocket or change the core run.
+const W = 1080, H = 1920;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Pre-render the nebula sky once: three full-screen gradients every frame
+// cost too much under software rendering and the game clock falls behind
+// real time, which breaks the recording's timing.
+const bgCanvas = document.createElement('canvas');
+bgCanvas.width = W;
+bgCanvas.height = H;
+{
+  const b = bgCanvas.getContext('2d');
+  const g = b.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b0620');
+  g.addColorStop(0.5, '#160b33');
+  g.addColorStop(1, '#05030f');
+  b.fillStyle = g;
+  b.fillRect(0, 0, W, H);
+  const neb1 = b.createRadialGradient(260, 420, 40, 260, 420, 520);
+  neb1.addColorStop(0, 'rgba(165, 94, 234, 0.30)');
+  neb1.addColorStop(1, 'rgba(165, 94, 234, 0)');
+  b.fillStyle = neb1;
+  b.fillRect(0, 0, W, H);
+  const neb2 = b.createRadialGradient(860, 1300, 40, 860, 1300, 560);
+  neb2.addColorStop(0, 'rgba(29, 209, 161, 0.20)');
+  neb2.addColorStop(1, 'rgba(29, 209, 161, 0)');
+  b.fillStyle = neb2;
+  b.fillRect(0, 0, W, H);
+}
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const SEED = 20261123;
+let rng = mulberry32(SEED);       // core stream: identical to day one
+const xrng = mulberry32(777);     // extras stream: never touches the core
+
+// Static star field, same positions as day one.
+const stars = [];
+{
+  const srng = mulberry32(42);
+  for (let i = 0; i < 46; i++) {
+    stars.push({ x: srng() * W, y: srng() * H, r: 1 + srng() * 1.6, a: 0.35 + srng() * 0.65 });
+  }
+}
+// Two extra parallax layers that drift downward.
+const parallax = [];
+for (let layer = 0; layer < 2; layer++) {
+  const n = layer === 0 ? 34 : 22;
+  const speed = layer === 0 ? 26 : 60;
+  for (let i = 0; i < n; i++) {
+    parallax.push({ x: xrng() * W, y: xrng() * H, r: 1 + xrng() * (layer === 0 ? 1.4 : 2.6), a: 0.3 + xrng() * 0.6, speed: speed });
+  }
+}
+// Slow background asteroids: decoration only, no collision, far behind.
+const bgRocks = [];
+for (let i = 0; i < 5; i++) {
+  bgRocks.push({ x: xrng() * W, y: xrng() * H, r: 14 + xrng() * 18, vy: 24 + xrng() * 26, rot: xrng() * Math.PI * 2, vrot: (xrng() - 0.5) * 0.4 });
+}
+
+const PALETTE = ['#ff9f43', '#ff6b6b', '#a55eea', '#1dd1a1'];
+const rocket = { x: W / 2, y: 1700, r: 22 }; // small hitbox: a run should survive 26 s
+const keys = {};
+let asteroids = [];
+let particles = [];
+let popups = [];
+let spawnTimer = 0;
+let spawnCount = 0;
+let score = 0;
+let combo = 0;
+let state = 'play'; // 'play' | 'over'
+let elapsed = 0;
+let powerup = null;
+
+// Recording driver: when the page is opened with ?drive=<url-encoded JSON
+// schedule of [gameTime, key, 'down'|'up'] events, the game applies them
+// on its own clock inside step(), so a recorded run replays exactly the
+// same way every time. Arrow keys still work by hand; the driver only
+// runs when the parameter is present (it is how the video's gameplay
+// was recorded: the schedule comes from sim.mjs, a dodge playthrough
+// of this same deterministic game).
+let driveSchedule = null;
+let driveIdx = 0;
+try {
+  const d = new URLSearchParams(location.search).get('drive');
+  if (d) driveSchedule = JSON.parse(decodeURIComponent(d));
+} catch (e) { driveSchedule = null; }
+let powerupAt = [8, 16]; // seconds: a golden star drifts across twice
+
+const SPAWN_EVERY = 1.1;   // same as day one: relaxed so a run survives 26 s
+const ROCKET_SPEED_X = 560; // same as day one
+const ROCKET_SPEED_Y = 380; // same as day one
+
+function spawnAsteroid() {
+  const r = 20 + rng() * 20; // smaller rocks than the first cut: easier to thread
+  asteroids.push({
+    x: 60 + rng() * (W - 120),
+    y: -70,
+    r: r,
+    vy: 200 + rng() * 100, // slower fall: the rocket has time to dodge
+    vx: (rng() - 0.5) * 40,
+    rot: rng() * Math.PI * 2,
+    vrot: (rng() - 0.5) * 1.6,
+    color: PALETTE[spawnCount % PALETTE.length]
+  });
+  spawnCount++;
+}
+
+function reset() {
+  rng = mulberry32(SEED);
+  asteroids = [];
+  particles = [];
+  popups = [];
+  spawnTimer = 0;
+  spawnCount = 0;
+  score = 0;
+  combo = 0;
+  state = 'play';
+  elapsed = 0;
+  powerup = null;
+  rocket.x = W / 2;
+  rocket.y = 1700;
+}
+
+window.addEventListener('keydown', (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
+  keys[e.key.toLowerCase()] = true;
+  if ((e.key === 'r' || e.key === 'R') && state === 'over') reset();
+});
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+function burst(x, y, color, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const ang = xrng() * Math.PI * 2;
+    const sp = speed * (0.4 + xrng() * 0.8);
+    particles.push({ x: x, y: y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: 0.5 + xrng() * 0.4, max: 0.9, r: 2 + xrng() * 4, color: color });
+  }
+}
+
+function step(dt) {
+  elapsed += dt;
+  if (driveSchedule) {
+    while (driveIdx < driveSchedule.length && elapsed >= driveSchedule[driveIdx][0]) {
+      const ev = driveSchedule[driveIdx];
+      keys[ev[1].toLowerCase()] = ev[2] === 'down';
+      driveIdx++;
+    }
+  }
+  // Background drift + thruster trail run even after game over.
+  for (const p of parallax) {
+    p.y += p.speed * dt;
+    if (p.y > H + 4) { p.y = -4; p.x = xrng() * W; }
+  }
+  for (const b of bgRocks) {
+    b.y += b.vy * dt;
+    b.rot += b.vrot * dt;
+    if (b.y - b.r > H) { b.y = -b.r; b.x = xrng() * W; }
+  }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = popups.length - 1; i >= 0; i--) {
+    const p = popups[i];
+    p.y -= 46 * dt; p.life -= dt;
+    if (p.life <= 0) popups.splice(i, 1);
+  }
+  if (state !== 'play') return;
+  // Steer the rocket (same speeds as day one).
+  let dx = 0, dy = 0;
+  if (keys['arrowleft'] || keys['a']) dx -= 1;
+  if (keys['arrowright'] || keys['d']) dx += 1;
+  if (keys['arrowup'] || keys['w']) dy -= 1;
+  if (keys['arrowdown'] || keys['s']) dy += 1;
+  rocket.x = Math.max(50, Math.min(W - 50, rocket.x + dx * ROCKET_SPEED_X * dt));
+  rocket.y = Math.max(1150, Math.min(1800, rocket.y + dy * ROCKET_SPEED_Y * dt));
+  // Thruster particles while flying.
+  particles.push({ x: rocket.x + (xrng() - 0.5) * 12, y: rocket.y + 30, vx: (xrng() - 0.5) * 30, vy: 120 + xrng() * 80, life: 0.35, max: 0.35, r: 3 + xrng() * 4, color: xrng() < 0.5 ? '#ff9f1c' : '#ffd32a' });
+  if (particles.length > 220) particles.splice(0, particles.length - 220);
+  // Power-up star drifts across at fixed times. It is decoration only:
+  // collecting it must never change the run, or day seven would stop
+  // matching day one's identical moments.
+  for (const t of powerupAt) {
+    if (!powerup && elapsed >= t && elapsed < t + 0.1) {
+      powerup = { x: t === 8 ? 300 : 780, y: -40, vy: 150, r: 30 };
+    }
+  }
+  if (powerup) {
+    powerup.y += powerup.vy * dt;
+    if (xrng() < 0.3) {
+      particles.push({ x: powerup.x + (xrng() - 0.5) * 40, y: powerup.y + (xrng() - 0.5) * 40, vx: 0, vy: 20, life: 0.5, max: 0.5, r: 2 + xrng() * 3, color: '#ffd32a' });
+    }
+    if (powerup.y > H + 60) powerup = null;
+  }
+  // Spawn and move asteroids: same schedule, same RNG as day one.
+  spawnTimer += dt;
+  while (spawnTimer >= SPAWN_EVERY) {
+    spawnTimer -= SPAWN_EVERY;
+    spawnAsteroid();
+  }
+  for (let i = asteroids.length - 1; i >= 0; i--) {
+    const a = asteroids[i];
+    a.y += a.vy * dt;
+    a.x += a.vx * dt;
+    a.rot += a.vrot * dt;
+    if (a.x < a.r) { a.x = a.r; a.vx = Math.abs(a.vx); }
+    if (a.x > W - a.r) { a.x = W - a.r; a.vx = -Math.abs(a.vx); }
+    if (a.y - a.r > H) {
+      asteroids.splice(i, 1);
+      score += 1;
+      combo += 1;
+      popups.push({ x: Math.max(80, Math.min(W - 80, a.x)), y: H - 120, text: '+1', life: 0.9, color: '#ffd32a' });
+      burst(a.x, H - 30, a.color, 8, 120);
+      continue;
+    }
+    const ddx = a.x - rocket.x, ddy = a.y - rocket.y;
+    if (Math.sqrt(ddx * ddx + ddy * ddy) < a.r * 0.8 + rocket.r) {
+      state = 'over';
+      burst(rocket.x, rocket.y, '#ff6b6b', 40, 320);
+    }
+  }
+}
+
+function drawRocket() {
+  ctx.save();
+  ctx.translate(rocket.x, rocket.y);
+  // Thruster flame.
+  const flick = 46 + Math.random() * 14;
+  ctx.fillStyle = '#ff9f1c';
+  ctx.beginPath();
+  ctx.moveTo(-11, 26);
+  ctx.lineTo(0, 26 + flick);
+  ctx.lineTo(11, 26);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#ffd32a';
+  ctx.beginPath();
+  ctx.moveTo(-6, 26);
+  ctx.lineTo(0, 26 + flick * 0.6);
+  ctx.lineTo(6, 26);
+  ctx.closePath();
+  ctx.fill();
+  // Body: red nose, white hull, blue window, fins.
+  ctx.fillStyle = '#ff6b6b';
+  ctx.beginPath();
+  ctx.moveTo(0, -40);
+  ctx.lineTo(14, -14);
+  ctx.lineTo(-14, -14);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#f5f5f5';
+  ctx.beginPath();
+  ctx.moveTo(0, -40);
+  ctx.lineTo(24, 28);
+  ctx.lineTo(-24, 28);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#ff6b6b';
+  ctx.beginPath();
+  ctx.moveTo(-24, 12);
+  ctx.lineTo(-38, 30);
+  ctx.lineTo(-24, 30);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(24, 12);
+  ctx.lineTo(38, 30);
+  ctx.lineTo(24, 30);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(0, -8, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#4aa8ff';
+  ctx.beginPath();
+  ctx.arc(0, -8, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawAsteroid(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(a.rot);
+  ctx.fillStyle = a.color;
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  const n = 9;
+  for (let i = 0; i <= n; i++) {
+    const ang = (i / n) * Math.PI * 2;
+    const rr = a.r * (0.82 + 0.18 * Math.sin(ang * 3 + a.rot));
+    const px = Math.cos(ang) * rr, py = Math.sin(ang) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.arc(-a.r * 0.3, -a.r * 0.2, a.r * 0.22, 0, Math.PI * 2);
+  ctx.arc(a.r * 0.35, a.r * 0.3, a.r * 0.16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPowerup() {
+  if (!powerup) return;
+  ctx.save();
+  ctx.translate(powerup.x, powerup.y);
+  ctx.rotate(Math.sin(elapsed * 3) * 0.2);
+  ctx.fillStyle = '#ffd32a';
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    const rr = i % 2 === 0 ? 30 : 13;
+    const px = Math.cos(ang) * rr, py = Math.sin(ang) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function draw() {
+  // Nebula sky, pre-rendered once (see bgCanvas above).
+  ctx.drawImage(bgCanvas, 0, 0);
+  // Stars: the same static field as day one, plus drifting parallax.
+  for (const s of stars) {
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  for (const p of parallax) {
+    ctx.globalAlpha = p.a;
+    ctx.fillStyle = '#cfe8ff';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // Background rocks, far behind.
+  for (const b of bgRocks) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.rot);
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#8a8f96';
+    ctx.beginPath();
+    ctx.arc(0, 0, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+  drawPowerup();
+  for (const a of asteroids) drawAsteroid(a);
+  // Particles.
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  drawRocket();
+  // Score popups.
+  ctx.textAlign = 'center';
+  for (const p of popups) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life));
+    ctx.fillStyle = p.color;
+    ctx.font = '700 52px "DejaVu Sans Mono", monospace';
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+  // HUD: gold score (layered text, no shadowBlur: too slow in software
+  // rendering), combo, day tag.
+  ctx.fillStyle = '#8a6d00';
+  ctx.font = '700 56px "DejaVu Sans Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SCORE ' + score, W / 2 + 2, 98);
+  ctx.fillStyle = '#ffd32a';
+  ctx.fillText('SCORE ' + score, W / 2, 96);
+  if (combo >= 3) {
+    ctx.fillStyle = '#1dd1a1';
+    ctx.font = '700 34px "DejaVu Sans Mono", monospace';
+    ctx.fillText('COMBO x' + combo, W / 2, 148);
+  }
+  ctx.fillStyle = '#ffd32a';
+  ctx.font = '700 34px "DejaVu Sans Mono", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('DAY SEVEN', 48, 90);
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(5,3,15,0.7)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.font = '700 84px "DejaVu Sans Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+    ctx.fillStyle = '#ffd32a';
+    ctx.font = '400 40px "DejaVu Sans Mono", monospace';
+    ctx.fillText('score ' + score + ' — press R to restart', W / 2, H / 2 + 40);
+  }
+}
+
+// Fixed 60 Hz timestep so replays are identical.
+const STEP = 1 / 60;
+let last = performance.now();
+let acc = 0;
+let firstFrame = true;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  acc += dt;
+  while (acc >= STEP) {
+    step(STEP);
+    acc -= STEP;
+  }
+  draw();
+  if (firstFrame) {
+    firstFrame = false;
+    window.__ready = true;
+  }
+  window.__score = score;
+  window.__state = state;
+  window.__elapsed = elapsed;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
