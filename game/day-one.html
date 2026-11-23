@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rocket Dodge — Day One</title>
+<meta name="viewport" content="width=1080, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+  canvas { display: block; width: 1080px; height: 1920px; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+// Rocket Dodge, DAY ONE: the bare first version.
+// One prompt, one file: a rocket dodging asteroids. Arrow keys to steer,
+// +1 for each asteroid dodged, game over on hit, R to restart.
+// Deterministic: fixed seed + fixed 60 Hz timestep, so the same inputs
+// always replay the same run. That is what lets day one and day seven
+// cut between identical moments.
+const W = 1080, H = 1920;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const SEED = 20261123;
+let rng = mulberry32(SEED);
+
+// Static star field, same in both versions.
+const stars = [];
+{
+  const srng = mulberry32(42);
+  for (let i = 0; i < 46; i++) {
+    stars.push({ x: srng() * W, y: srng() * H, r: 1 + srng() * 1.6, a: 0.35 + srng() * 0.65 });
+  }
+}
+
+const rocket = { x: W / 2, y: 1700, r: 22 }; // small hitbox: a run should survive 26 s
+const keys = {};
+let asteroids = [];
+let spawnTimer = 0;
+let score = 0;
+let state = 'play'; // 'play' | 'over'
+let elapsed = 0;
+
+// Recording driver: when the page is opened with ?drive=<url-encoded JSON
+// schedule of [gameTime, key, 'down'|'up'] events, the game applies them
+// on its own clock inside step(), so a recorded run replays exactly the
+// same way every time. Arrow keys still work by hand; the driver only
+// runs when the parameter is present (it is how the video's gameplay
+// was recorded: the schedule comes from sim.mjs, a dodge playthrough
+// of this same deterministic game).
+let driveSchedule = null;
+let driveIdx = 0;
+try {
+  const d = new URLSearchParams(location.search).get('drive');
+  if (d) driveSchedule = JSON.parse(decodeURIComponent(d));
+} catch (e) { driveSchedule = null; }
+
+const SPAWN_EVERY = 1.1;   // seconds between asteroids: relaxed so a run survives 26 s
+const ROCKET_SPEED_X = 560; // px per second
+const ROCKET_SPEED_Y = 380;
+
+function spawnAsteroid() {
+  const r = 20 + rng() * 20; // smaller rocks than the first cut: easier to thread
+  asteroids.push({
+    x: 60 + rng() * (W - 120),
+    y: -70,
+    r: r,
+    vy: 200 + rng() * 100, // slower fall: the rocket has time to dodge
+    vx: (rng() - 0.5) * 40,
+    rot: rng() * Math.PI * 2,
+    vrot: (rng() - 0.5) * 1.6
+  });
+}
+
+function reset() {
+  rng = mulberry32(SEED);
+  asteroids = [];
+  spawnTimer = 0;
+  score = 0;
+  state = 'play';
+  elapsed = 0;
+  rocket.x = W / 2;
+  rocket.y = 1700;
+}
+
+window.addEventListener('keydown', (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
+  keys[e.key.toLowerCase()] = true;
+  if ((e.key === 'r' || e.key === 'R') && state === 'over') reset();
+});
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+function step(dt) {
+  elapsed += dt;
+  if (driveSchedule) {
+    while (driveIdx < driveSchedule.length && elapsed >= driveSchedule[driveIdx][0]) {
+      const ev = driveSchedule[driveIdx];
+      keys[ev[1].toLowerCase()] = ev[2] === 'down';
+      driveIdx++;
+    }
+  }
+  if (state !== 'play') return;
+  // Steer the rocket.
+  let dx = 0, dy = 0;
+  if (keys['arrowleft'] || keys['a']) dx -= 1;
+  if (keys['arrowright'] || keys['d']) dx += 1;
+  if (keys['arrowup'] || keys['w']) dy -= 1;
+  if (keys['arrowdown'] || keys['s']) dy += 1;
+  rocket.x = Math.max(50, Math.min(W - 50, rocket.x + dx * ROCKET_SPEED_X * dt));
+  rocket.y = Math.max(1150, Math.min(1800, rocket.y + dy * ROCKET_SPEED_Y * dt));
+  // Spawn and move asteroids.
+  spawnTimer += dt;
+  while (spawnTimer >= SPAWN_EVERY) {
+    spawnTimer -= SPAWN_EVERY;
+    spawnAsteroid();
+  }
+  for (let i = asteroids.length - 1; i >= 0; i--) {
+    const a = asteroids[i];
+    a.y += a.vy * dt;
+    a.x += a.vx * dt;
+    a.rot += a.vrot * dt;
+    if (a.x < a.r) { a.x = a.r; a.vx = Math.abs(a.vx); }
+    if (a.x > W - a.r) { a.x = W - a.r; a.vx = -Math.abs(a.vx); }
+    if (a.y - a.r > H) {
+      asteroids.splice(i, 1);
+      score += 1;
+      continue;
+    }
+    const ddx = a.x - rocket.x, ddy = a.y - rocket.y;
+    if (Math.sqrt(ddx * ddx + ddy * ddy) < a.r * 0.8 + rocket.r) {
+      state = 'over';
+    }
+  }
+}
+
+function drawRocket() {
+  ctx.save();
+  ctx.translate(rocket.x, rocket.y);
+  // Flame.
+  ctx.fillStyle = '#ff9f1c';
+  ctx.beginPath();
+  ctx.moveTo(-10, 26);
+  ctx.lineTo(0, 52 + Math.random() * 8);
+  ctx.lineTo(10, 26);
+  ctx.closePath();
+  ctx.fill();
+  // Body: a plain white triangle with a window.
+  ctx.fillStyle = '#f5f5f5';
+  ctx.beginPath();
+  ctx.moveTo(0, -38);
+  ctx.lineTo(24, 26);
+  ctx.lineTo(-24, 26);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(0, -6, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#4aa8ff';
+  ctx.beginPath();
+  ctx.arc(0, -6, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawAsteroid(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(a.rot);
+  ctx.fillStyle = '#9aa0a6';
+  ctx.strokeStyle = '#6c7076';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  const n = 9;
+  for (let i = 0; i <= n; i++) {
+    const ang = (i / n) * Math.PI * 2;
+    const rr = a.r * (0.82 + 0.18 * Math.sin(ang * 3 + a.rot));
+    const px = Math.cos(ang) * rr, py = Math.sin(ang) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#7d8288';
+  ctx.beginPath();
+  ctx.arc(-a.r * 0.3, -a.r * 0.2, a.r * 0.22, 0, Math.PI * 2);
+  ctx.arc(a.r * 0.35, a.r * 0.3, a.r * 0.16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  for (const s of stars) {
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (const a of asteroids) drawAsteroid(a);
+  drawRocket();
+  // HUD: minimal.
+  ctx.fillStyle = '#fff';
+  ctx.font = '700 44px "DejaVu Sans Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('SCORE ' + score, W / 2, 90);
+  ctx.font = '700 34px "DejaVu Sans Mono", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#bbbbbb';
+  ctx.fillText('DAY ONE', 48, 90);
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.font = '700 84px "DejaVu Sans Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+    ctx.font = '400 40px "DejaVu Sans Mono", monospace';
+    ctx.fillText('score ' + score + ' — press R to restart', W / 2, H / 2 + 40);
+  }
+}
+
+// Fixed 60 Hz timestep so replays are identical.
+const STEP = 1 / 60;
+let last = performance.now();
+let acc = 0;
+let firstFrame = true;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  acc += dt;
+  while (acc >= STEP) {
+    step(STEP);
+    acc -= STEP;
+  }
+  draw();
+  if (firstFrame) {
+    firstFrame = false;
+    window.__ready = true;
+  }
+  window.__score = score;
+  window.__state = state;
+  window.__elapsed = elapsed;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
