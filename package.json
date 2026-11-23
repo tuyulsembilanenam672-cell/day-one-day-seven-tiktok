@@ -1,0 +1,8 @@
+{
+  "name": "day-one-day-seven-tiktok",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Day one, day seven — a TikTok video about the same tiny agent-built game on the day it was made and after a week of daily updates.",
+  "license": "MIT"
+}
