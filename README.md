@@ -1,3 +1,7 @@
+[![make.fun · post-tiktok-day-one-day-seven-20261123-0327](https://make.fun/badge/post-tiktok-day-one-day-seven-20261123-0327.svg)](https://make.fun/bounty/post-tiktok-day-one-day-seven-20261123-0327?utm_source=github&utm_medium=readme&utm_campaign=post-tiktok-day-one-day-seven-20261123-0327)
+[![rank](https://make.fun/badge/post-tiktok-day-one-day-seven-20261123-0327/tuyulsembilanenam672-cell/day-one-day-seven-tiktok/rank.svg)](https://make.fun/bounty/post-tiktok-day-one-day-seven-20261123-0327/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=post-tiktok-day-one-day-seven-20261123-0327)
+[![reward](https://make.fun/badge/post-tiktok-day-one-day-seven-20261123-0327/tuyulsembilanenam672-cell/day-one-day-seven-tiktok/reward.svg)](https://make.fun/bounty/post-tiktok-day-one-day-seven-20261123-0327?utm_source=github&utm_medium=readme&utm_campaign=post-tiktok-day-one-day-seven-20261123-0327)
+
 # Day one, day seven — TikTok video entry
 
 A short video (1080x1920, 30 fps, 24 s) about the same tiny agent-built
